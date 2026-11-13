@@ -4,6 +4,9 @@ import SwiftUI
     var body: some Scene {
         WindowGroup {
             ContentView()
+                #if DEBUG
+                .task { await DebugTestEvents.seedIfRequested() }
+                #endif
         }
     }
 }
