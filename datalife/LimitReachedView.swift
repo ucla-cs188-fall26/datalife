@@ -15,13 +15,14 @@ struct LimitReachedView: View {
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var calendar = TodayCalendar()
-    @State private var confirmOverride = false
+    @State private var showBreathing = false
+    @State private var overrideConfirmed = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Button("Emergency Override") {
-                    confirmOverride = true
+                    showBreathing = true
                 }
                 .font(.title3)
                 .fontWeight(.semibold)
@@ -72,14 +73,17 @@ struct LimitReachedView: View {
         }
         .padding()
         .task { await calendar.load() }
-        .alert("Use an emergency override?", isPresented: $confirmOverride) {
-            Button("Cancel", role: .cancel) {}
-            Button("Unblock for \(ContentView.overrideMinutes) min", role: .destructive) {
+        // Friction before overriding: finish a short breathing pause first.
+        .fullScreenCover(isPresented: $showBreathing, onDismiss: {
+            if overrideConfirmed {
+                overrideConfirmed = false
                 onEmergencyOverride()
                 dismiss()
             }
-        } message: {
-            Text("Your blocked apps will open again for \(ContentView.overrideMinutes) minutes. Only use this if you really need to.")
+        }) {
+            BreathingView(continueTitle: "Unblock for \(ContentView.overrideMinutes) min") {
+                overrideConfirmed = true
+            }
         }
     }
 
@@ -126,6 +130,12 @@ struct LimitReachedView: View {
     private func usedMinutes(at now: Date) -> Int {
         let extra = max(0, Int(now.timeIntervalSince(limitReachedAt) / 60))
         return limitMinutes + extra
+    }
+
+    static func format(seconds: Int) -> String {
+        let m = seconds / 60, s = seconds % 60
+        if m == 0 { return "\(s) sec" }
+        return s == 0 ? "\(m) min" : "\(m) min \(s) sec"
     }
 
     static func format(minutes: Int) -> String {

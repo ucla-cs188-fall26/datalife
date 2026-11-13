@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var authStatus = AuthorizationCenter.shared.authorizationStatus
     @State private var statusMessage = ""
     @State private var showLimitScreen = false
+    @State private var showBreathing = false
+    @State private var showBreathingSettings = false
     @State private var overrideUntil: Date? = UserDefaults.standard.object(forKey: ContentView.overrideKey) as? Date
 
     @Environment(\.scenePhase) private var scenePhase
@@ -95,6 +97,16 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
 
+            Button("Take a Breather") {
+                showBreathing = true
+            }
+            .buttonStyle(.bordered)
+
+            Button("Breathing Timer Settings") {
+                showBreathingSettings = true
+            }
+            .font(.footnote)
+
             if !statusMessage.isEmpty {
                 Text(statusMessage)
                     .font(.caption)
@@ -124,6 +136,12 @@ struct ContentView: View {
                 limitReachedAt: .now,
                 onEmergencyOverride: startOverride
             )
+        }
+        .fullScreenCover(isPresented: $showBreathing) {
+            BreathingView()
+        }
+        .sheet(isPresented: $showBreathingSettings) {
+            BreathingSettingsView()
         }
     }
 
