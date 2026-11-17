@@ -17,6 +17,11 @@ struct ContentView: View {
     // Daily time limit: a fixed number of minutes for now (no allowance algorithm yet).
     @AppStorage(TimeLimit.enabledKey, store: TimeLimit.shared) private var timeLimitOn = false
     @AppStorage(TimeLimit.limitMinutesKey, store: TimeLimit.shared) private var limitMinutes = TimeLimit.defaultMinutes
+    // When on, the daily limit follows today's schedule-based allowance instead of the stepper.
+    @AppStorage(TimeLimit.useScheduleKey, store: TimeLimit.shared) private var useSchedule = false
+
+    @EnvironmentObject private var busyTime: BusyTimeModel
+    @State private var showBusyTime = false
 
     @State private var overrideUntil: Date? = UserDefaults.standard.object(forKey: ContentView.overrideKey) as? Date
 
@@ -42,6 +47,8 @@ struct ContentView: View {
     }
 
     var body: some View {
+        // Scrolls so every control stays reachable on smaller phones.
+        ScrollView {
         VStack(spacing: 24) {
             Text("App Blocker")
                 .font(.largeTitle)
@@ -112,7 +119,13 @@ struct ContentView: View {
             VStack(spacing: 8) {
                 Toggle("Block only after a daily time limit", isOn: $timeLimitOn)
                 if timeLimitOn {
-                    Stepper("Daily limit: \(limitMinutes) min", value: $limitMinutes, in: 1...240)
+                    Toggle("Set limit from my schedule", isOn: $useSchedule)
+                    if useSchedule {
+                        Text("Today's limit: \(limitMinutes) min (busy \(LimitReachedView.format(minutes: Int((busyTime.today?.busyMinutes ?? 0).rounded()))))")
+                            .multilineTextAlignment(.center)
+                    } else {
+                        Stepper("Daily limit: \(limitMinutes) min", value: $limitMinutes, in: 1...240)
+                    }
                     if let limitReachedAt {
                         Text("Limit reached at \(limitReachedAt.formatted(date: .omitted, time: .shortened))")
                             .font(.footnote)
@@ -153,6 +166,11 @@ struct ContentView: View {
             }
             .font(.footnote)
 
+            Button("Calendar & Busy Time") {
+                showBusyTime = true
+            }
+            .font(.footnote)
+
             if !statusMessage.isEmpty {
                 Text(statusMessage)
                     .font(.caption)
@@ -162,6 +180,7 @@ struct ContentView: View {
             }
         }
         .padding()
+        }
         .familyActivityPicker(isPresented: $isPickerPresented, selection: $selection)
         .onChange(of: selection) { _, newSelection in
             ContentView.saveSelection(newSelection)
@@ -169,12 +188,18 @@ struct ContentView: View {
         }
         .onChange(of: timeLimitOn) { _, isOn in
             if !isOn { TimeLimit.stopMonitoring() }
+            applyScheduleLimit()
             updateBlocking()
         }
+        .onChange(of: useSchedule) { _, _ in applyScheduleLimit() }
+        .onChange(of: busyTime.allowanceMinutes) { _, _ in applyScheduleLimit() }
         .onChange(of: limitMinutes) { _, _ in
             updateBlocking()
         }
-        .onAppear { checkLimitReached() }
+        .onAppear {
+            applyScheduleLimit()
+            checkLimitReached()
+        }
         .onReceive(AuthorizationCenter.shared.$authorizationStatus) { status in
             authStatus = status
         }
@@ -197,6 +222,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showBreathingSettings) {
             BreathingSettingsView()
+        }
+        .sheet(isPresented: $showBusyTime) {
+            BusyTimeSettingsView()
+                .environmentObject(busyTime)
         }
     }
 
@@ -235,6 +264,14 @@ struct ContentView: View {
         } catch {
             statusMessage = "Couldn't start the time limit: \(error.localizedDescription)"
         }
+    }
+
+    /// With "Set limit from my schedule" on, copies today's allowance into the daily limit.
+    /// Changing `limitMinutes` triggers its onChange, which restarts monitoring via updateBlocking().
+    private func applyScheduleLimit() {
+        guard timeLimitOn, useSchedule else { return }
+        let minutes = min(240, max(1, busyTime.allowanceMinutes))
+        if limitMinutes != minutes { limitMinutes = minutes }
     }
 
     /// Picks up a limit that the monitor extension reached while the app was closed,
@@ -306,4 +343,5 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(BusyTimeModel())
 }
