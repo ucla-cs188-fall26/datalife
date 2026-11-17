@@ -21,7 +21,6 @@ struct ContentView: View {
     @AppStorage(TimeLimit.useScheduleKey, store: TimeLimit.shared) private var useSchedule = false
 
     @EnvironmentObject private var busyTime: BusyTimeModel
-    @State private var showBusyTime = false
 
     @State private var overrideUntil: Date? = UserDefaults.standard.object(forKey: ContentView.overrideKey) as? Date
 
@@ -46,140 +45,18 @@ struct ContentView: View {
             || !selection.webDomainTokens.isEmpty
     }
 
+    /// Shown until Screen Time is approved and calendar access has been asked for (e.g. first launch).
+    private var needsPermissions: Bool {
+        authStatus != .approved || busyTime.access == .notDetermined
+    }
+
     var body: some View {
-        // Scrolls so every control stays reachable on smaller phones.
-        ScrollView {
-        VStack(spacing: 24) {
-            Text("App Blocker")
-                .font(.largeTitle)
-                .bold()
-
-            // 1. Authorization
-            if authStatus != .approved {
-                Button("1. Grant Screen Time Permission") {
-                    Task {
-                        do {
-                            try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
-                            authStatus = AuthorizationCenter.shared.authorizationStatus
-                            statusMessage = "Permission granted!"
-                        } catch {
-                            authStatus = AuthorizationCenter.shared.authorizationStatus
-                            statusMessage = "Error: \(error.localizedDescription)"
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
+        Group {
+            if needsPermissions {
+                permissionsScreen
             } else {
-                Text("✓ Permission Granted")
-                    .foregroundColor(.green)
+                home
             }
-
-            // 2. Select & Block App
-            Button("2. Select App to Block") {
-                isPickerPresented = true
-            }
-            .buttonStyle(.bordered)
-            .disabled(authStatus != .approved)
-
-            // 3. Shield Status
-            if !hasSelection {
-                Text("No app selected")
-                    .foregroundColor(.secondary)
-            } else if !shouldBlockNow {
-                Text("Selected apps will be blocked after \(limitMinutes) min of use today")
-                    .foregroundColor(.orange)
-                    .fontWeight(.bold)
-                    .multilineTextAlignment(.center)
-
-                Button("Unblock") {
-                    selection = FamilyActivitySelection()
-                }
-                .foregroundColor(.secondary)
-            } else {
-                Text(timeLimitOn ? "Daily limit reached: apps blocked" : "Shield active on selected app(s)")
-                    .foregroundColor(.red)
-                    .fontWeight(.bold)
-
-                // Read back what iOS actually saved, as proof the block was applied.
-                Text(savedShieldSummary)
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
-
-                Button("Unblock") {
-                    selection = FamilyActivitySelection()
-                    store.shield.applications = nil
-                    store.shield.applicationCategories = nil
-                    store.shield.webDomains = nil
-                    store.shield.webDomainCategories = nil
-                }
-                .foregroundColor(.secondary)
-            }
-
-            // 4. Daily time limit
-            VStack(spacing: 8) {
-                Toggle("Block only after a daily time limit", isOn: $timeLimitOn)
-                if timeLimitOn {
-                    Toggle("Set limit from my schedule", isOn: $useSchedule)
-                    if useSchedule {
-                        Text("Today's limit: \(limitMinutes) min (busy \(LimitReachedView.format(minutes: Int((busyTime.today?.busyMinutes ?? 0).rounded()))))")
-                            .multilineTextAlignment(.center)
-                    } else {
-                        Stepper("Daily limit: \(limitMinutes) min", value: $limitMinutes, in: 1...240)
-                    }
-                    if let limitReachedAt {
-                        Text("Limit reached at \(limitReachedAt.formatted(date: .omitted, time: .shortened))")
-                            .font(.footnote)
-                            .foregroundColor(.red)
-                    }
-                    #if DEBUG
-                    // Test helper: does exactly what the monitor extension does when the limit is hit,
-                    // so the flow can be shown where usage tracking doesn't run (the Simulator).
-                    Button("Simulate Reaching Limit (test)") {
-                        markLimitReached()
-                    }
-                    .font(.footnote)
-                    .disabled(!hasSelection)
-                    #endif
-                }
-            }
-            .disabled(authStatus != .approved)
-
-            if let overrideUntil, overrideUntil > .now {
-                Text("Override active until \(overrideUntil.formatted(date: .omitted, time: .shortened))")
-                    .font(.footnote)
-                    .foregroundColor(.orange)
-            }
-
-            // Preview of the screen shown when the daily limit is reached.
-            Button("Show Limit Reached Screen") {
-                showLimitScreen = true
-            }
-            .buttonStyle(.bordered)
-
-            Button("Take a Breather") {
-                showBreathing = true
-            }
-            .buttonStyle(.bordered)
-
-            Button("Breathing Timer Settings") {
-                showBreathingSettings = true
-            }
-            .font(.footnote)
-
-            Button("Calendar & Busy Time") {
-                showBusyTime = true
-            }
-            .font(.footnote)
-
-            if !statusMessage.isEmpty {
-                Text(statusMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding()
-            }
-        }
-        .padding()
         }
         .familyActivityPicker(isPresented: $isPickerPresented, selection: $selection)
         .onChange(of: selection) { _, newSelection in
@@ -196,7 +73,9 @@ struct ContentView: View {
         .onChange(of: limitMinutes) { _, _ in
             updateBlocking()
         }
+        .onChange(of: busyTime.availableCalendars) { _, _ in useOwnCalendars() }
         .onAppear {
+            useOwnCalendars()
             applyScheduleLimit()
             checkLimitReached()
         }
@@ -223,10 +102,235 @@ struct ContentView: View {
         .sheet(isPresented: $showBreathingSettings) {
             BreathingSettingsView()
         }
-        .sheet(isPresented: $showBusyTime) {
-            BusyTimeSettingsView()
-                .environmentObject(busyTime)
+    }
+
+    // MARK: Permissions (first launch)
+
+    private var permissionsScreen: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            Text("Welcome to DataLife")
+                .font(.largeTitle)
+                .bold()
+                .multilineTextAlignment(.center)
+            Text("DataLife needs two permissions to set your daily limit and block apps.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            permissionRow(
+                icon: "hourglass",
+                title: "Screen Time",
+                detail: "Lets DataLife block the apps you choose.",
+                granted: authStatus == .approved,
+                action: requestScreenTime
+            )
+            permissionRow(
+                icon: "calendar",
+                title: "Calendar",
+                detail: "Sets your limit from how busy your day is. Only event times are read.",
+                granted: busyTime.access != .notDetermined,
+                action: { Task { await busyTime.requestCalendarAccess() } }
+            )
+
+            if !statusMessage.isEmpty {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            Spacer()
         }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private func permissionRow(icon: String, title: String, detail: String,
+                               granted: Bool, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if granted {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.green)
+            } else {
+                Button("Allow", action: action)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func requestScreenTime() {
+        Task {
+            do {
+                try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+                statusMessage = ""
+            } catch {
+                statusMessage = "Error: \(error.localizedDescription)"
+            }
+            authStatus = AuthorizationCenter.shared.authorizationStatus
+        }
+    }
+
+    // MARK: Home
+
+    private var home: some View {
+        List {
+            Section { summary }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+
+            blockingSection
+
+            BusyTimeSections()
+
+            dailyLimitSection
+
+            Section {
+                if let overrideUntil, overrideUntil > .now {
+                    Text("Override active until \(overrideUntil.formatted(date: .omitted, time: .shortened))")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+                // Preview of the screen shown when the daily limit is reached.
+                Button("Show Limit Reached Screen") { showLimitScreen = true }
+                Button("Take a Breather") { showBreathing = true }
+                Button("Breathing Timer Settings") { showBreathingSettings = true }
+            }
+
+            if !statusMessage.isEmpty {
+                Section {
+                    Text(statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+    }
+
+    /// Today's limit and busy time: the biggest numbers on the screen.
+    private var summary: some View {
+        HStack(spacing: 12) {
+            summaryTile(
+                title: "Today's limit",
+                value: LimitReachedView.format(minutes: timeLimitOn ? limitMinutes : busyTime.allowanceMinutes),
+                caption: timeLimitOn
+                    ? (useSchedule ? "From your schedule" : "Set manually")
+                    : "Allowance · limit off"
+            )
+            summaryTile(
+                title: "Busy today",
+                value: LimitReachedView.format(minutes: Int((busyTime.today?.busyMinutes ?? 0).rounded())),
+                caption: "Calendar + manual"
+            )
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func summaryTile(title: String, value: String, caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 40, weight: .bold, design: .rounded))
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var blockingSection: some View {
+        Section {
+            Button {
+                isPickerPresented = true
+            } label: {
+                Label(hasSelection ? "Change Blocked Apps" : "Select Apps to Block", systemImage: "apps.iphone")
+            }
+
+            if !hasSelection {
+                Text("No app selected")
+                    .foregroundStyle(.secondary)
+            } else if !shouldBlockNow {
+                Text("Selected apps will be blocked after \(limitMinutes) min of use today")
+                    .foregroundStyle(.orange)
+                    .fontWeight(.bold)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(timeLimitOn ? "Daily limit reached: apps blocked" : "Shield active on selected app(s)")
+                        .foregroundStyle(.red)
+                        .fontWeight(.bold)
+                    // Read back what iOS actually saved, as proof the block was applied.
+                    Text(savedShieldSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if hasSelection {
+                Button("Unblock", role: .destructive) {
+                    selection = FamilyActivitySelection()
+                    clearShield()
+                }
+            }
+        } header: {
+            Text("Blocked apps")
+        }
+    }
+
+    private var dailyLimitSection: some View {
+        Section {
+            Toggle("Block only after a daily time limit", isOn: $timeLimitOn)
+            if timeLimitOn {
+                Toggle("Set limit from my schedule", isOn: $useSchedule)
+                if !useSchedule {
+                    Stepper("Daily limit: \(limitMinutes) min", value: $limitMinutes, in: 1...240)
+                }
+                if let limitReachedAt {
+                    Text("Limit reached at \(limitReachedAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                #if DEBUG
+                // Test helper: does exactly what the monitor extension does when the limit is hit,
+                // so the flow can be shown where usage tracking doesn't run (the Simulator).
+                Button("Simulate Reaching Limit (test)") {
+                    markLimitReached()
+                }
+                .font(.footnote)
+                .disabled(!hasSelection)
+                #endif
+            }
+        } header: {
+            Text("Daily limit")
+        }
+    }
+
+    /// Counts the user's own calendars automatically (skips Birthdays, holidays and other
+    /// subscriptions), so there's nothing to choose.
+    private func useOwnCalendars() {
+        guard busyTime.access.canRead else { return }
+        let ids = Set(busyTime.availableCalendars.filter(\.isPersonal).map(\.id))
+        if !busyTime.settings.useCalendars { busyTime.settings.useCalendars = true }
+        if busyTime.settings.selectedCalendarIDs != ids { busyTime.settings.selectedCalendarIDs = ids }
     }
 
     private var savedShieldSummary: String {

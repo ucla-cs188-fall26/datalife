@@ -6,62 +6,38 @@ extension TimeLimit {
     static let useScheduleKey = "timeLimit.useSchedule"
 }
 
-/// Calendar and busy-time settings: today's result, calendar permission and selection,
-/// manual busy times, and how the allowance is calculated.
-struct BusyTimeSettingsView: View {
+/// Calendar and busy-time settings shown inline on the home screen (inside a List):
+/// today's busy times, manual busy times, the allowance formula and what counts as busy.
+/// Calendars aren't listed; the home screen uses the user's own calendars automatically.
+struct BusyTimeSections: View {
     @EnvironmentObject private var busyTime: BusyTimeModel
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var showAddPeriod = false
 
     var body: some View {
-        NavigationStack {
-            Form {
-                todaySection
-                calendarSection
-                manualSection
-                allowanceSection
-                rulesSection
-            }
-            .navigationTitle("Calendar & Busy Time")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .sheet(isPresented: $showAddPeriod) {
-                AddBusyPeriodView { period in
-                    busyTime.settings.manualPeriods.append(period)
-                }
-            }
-            .onAppear { busyTime.refresh() }
-            .onChange(of: busyTime.settings.allowance.baseMinutes) { _, base in
-                if busyTime.settings.allowance.minMinutes > base {
-                    busyTime.settings.allowance.minMinutes = base
-                }
-            }
-        }
+        todaySection
+        manualSection
+        allowanceSection
+        rulesSection
     }
 
     private var todaySection: some View {
         Section {
-            LabeledContent("Busy today", value: LimitReachedView.format(minutes: busyMinutes))
-            LabeledContent("Today's allowance", value: LimitReachedView.format(minutes: busyTime.allowanceMinutes))
-            if let day = busyTime.today {
+            if let day = busyTime.today, !day.busyIntervals.isEmpty {
                 ForEach(day.busyIntervals, id: \.self) { interval in
                     Text(Self.timeRange(interval.start, interval.end))
-                        .foregroundStyle(.secondary)
                 }
+            } else {
+                Text("Nothing busy today")
+                    .foregroundStyle(.secondary)
             }
+            calendarAccessRows
         } header: {
-            Text("Today")
+            Text("Calendar & busy time")
         } footer: {
-            Text(sourceDescription)
+            Text(sourceDescription + " DataLife only reads when events start and end. Nothing leaves your phone.")
         }
     }
-
-    private var busyMinutes: Int { Int((busyTime.today?.busyMinutes ?? 0).rounded()) }
 
     private var usingCalendars: Bool {
         busyTime.settings.useCalendars && busyTime.access.canRead
@@ -70,59 +46,24 @@ struct BusyTimeSettingsView: View {
 
     private var sourceDescription: String {
         let source = usingCalendars
-            ? "From your selected calendars and manual busy times"
+            ? "From your calendar and manual busy times"
             : "From your manual busy times only"
         guard let window = busyTime.today?.window else { return source + "." }
         return "\(source), between \(Self.timeRange(window.start, window.end))."
     }
 
-    private var calendarSection: some View {
-        Section {
-            Toggle("Use my calendars", isOn: $busyTime.settings.useCalendars)
-            if busyTime.settings.useCalendars {
-                calendarAccessRows
-            }
-        } header: {
-            Text("Calendars")
-        } footer: {
-            Text("DataLife only looks at when your events start and end, to see how busy your day is. Event names and details aren't saved, and nothing leaves your phone. Google or Outlook calendars show up here if you've added that account in iOS Settings.")
-        }
-    }
-
     @ViewBuilder
     private var calendarAccessRows: some View {
         switch busyTime.access {
+        case .fullAccess:
+            EmptyView()
         case .notDetermined:
             Button("Allow Calendar Access") {
                 Task { await busyTime.requestCalendarAccess() }
             }
-        case .fullAccess:
-            if busyTime.availableCalendars.isEmpty {
-                Text("No calendars on this device.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(busyTime.availableCalendars) { calendar in
-                Toggle(isOn: selectionBinding(for: calendar.id)) {
-                    VStack(alignment: .leading) {
-                        Text(calendar.title)
-                        if !calendar.accountTitle.isEmpty {
-                            Text(calendar.accountTitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            let missing = busyTime.missingSelectedCalendarIDs.count
-            if missing > 0 {
-                Text(missing == 1
-                     ? "1 calendar you chose is no longer on this device and is skipped."
-                     : "\(missing) calendars you chose are no longer on this device and are skipped.")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-            }
         case .denied, .restricted, .writeOnly:
             Text(accessProblem)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
             Button("Open Settings") {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -143,13 +84,6 @@ struct BusyTimeSettingsView: View {
         }
     }
 
-    private func selectionBinding(for id: String) -> Binding<Bool> {
-        Binding(
-            get: { busyTime.settings.selectedCalendarIDs.contains(id) },
-            set: { busyTime.setCalendar(id, selected: $0) }
-        )
-    }
-
     private var manualSection: some View {
         Section {
             ForEach(busyTime.settings.manualPeriods) { period in
@@ -160,10 +94,15 @@ struct BusyTimeSettingsView: View {
                 busyTime.settings.manualPeriods.remove(atOffsets: offsets)
             }
             Button("Add Busy Time") { showAddPeriod = true }
+                .sheet(isPresented: $showAddPeriod) {
+                    AddBusyPeriodView { period in
+                        busyTime.settings.manualPeriods.append(period)
+                    }
+                }
         } header: {
             Text("Manual busy times")
         } footer: {
-            Text("For classes, work or anything that isn't on a calendar. These count even without calendar access. Swipe left to delete.")
+            Text("For classes, work or anything that isn't on your calendar. Swipe left to delete.")
         }
     }
 
@@ -171,6 +110,11 @@ struct BusyTimeSettingsView: View {
         Section {
             Stepper("Free day: \(LimitReachedView.format(minutes: busyTime.settings.allowance.baseMinutes))",
                     value: $busyTime.settings.allowance.baseMinutes, in: 15...240, step: 5)
+                .onChange(of: busyTime.settings.allowance.baseMinutes) { _, base in
+                    if busyTime.settings.allowance.minMinutes > base {
+                        busyTime.settings.allowance.minMinutes = base
+                    }
+                }
             Stepper("Minimum: \(LimitReachedView.format(minutes: busyTime.settings.allowance.minMinutes))",
                     value: $busyTime.settings.allowance.minMinutes,
                     in: 0...max(0, busyTime.settings.allowance.baseMinutes), step: 5)
@@ -258,11 +202,11 @@ struct AddBusyPeriodView: View {
     @State private var repeatsWeekly = true
     @State private var weekday = Calendar.current.component(.weekday, from: .now)
     @State private var day = Date.now
-    @State private var start = BusyTimeSettingsView.clockTime(9 * 60)
-    @State private var end = BusyTimeSettingsView.clockTime(10 * 60)
+    @State private var start = BusyTimeSections.clockTime(9 * 60)
+    @State private var end = BusyTimeSections.clockTime(10 * 60)
 
-    private var startMinute: Int { BusyTimeSettingsView.minuteOfDay(start) }
-    private var endMinute: Int { BusyTimeSettingsView.minuteOfDay(end) }
+    private var startMinute: Int { BusyTimeSections.minuteOfDay(start) }
+    private var endMinute: Int { BusyTimeSections.minuteOfDay(end) }
     private var isValid: Bool { endMinute > startMinute }
 
     var body: some View {
@@ -319,6 +263,6 @@ struct AddBusyPeriodView: View {
 }
 
 #Preview {
-    BusyTimeSettingsView()
+    List { BusyTimeSections() }
         .environmentObject(BusyTimeModel())
 }

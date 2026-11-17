@@ -18,6 +18,8 @@ nonisolated struct CalendarInfo: Identifiable, Equatable, Sendable {
     var title: String
     /// The account it comes from, e.g. "iCloud" or a Google account added in iOS Settings.
     var accountTitle: String
+    /// The user's own editable calendar, not Birthdays, holidays or other subscriptions.
+    var isPersonal: Bool = true
 }
 
 /// What busy-time needs from the calendar system. EventKit in the app; a fake in tests.
@@ -75,7 +77,14 @@ final class EventKitCalendarProvider: CalendarEventProviding {
     func calendars() -> [CalendarInfo] {
         guard access.canRead else { return [] }
         return store.calendars(for: .event)
-            .map { CalendarInfo(id: $0.calendarIdentifier, title: $0.title, accountTitle: $0.source?.title ?? "") }
+            .map {
+                CalendarInfo(
+                    id: $0.calendarIdentifier,
+                    title: $0.title,
+                    accountTitle: $0.source?.title ?? "",
+                    isPersonal: $0.allowsContentModifications && $0.type != .birthday && $0.type != .subscription
+                )
+            }
             .sorted { ($0.accountTitle, $0.title) < ($1.accountTitle, $1.title) }
     }
 
